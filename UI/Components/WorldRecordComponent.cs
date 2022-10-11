@@ -30,6 +30,7 @@ namespace LiveSplit.WorldRecord.UI.Components
         private TimeStamp LastUpdate { get; set; }
         private TimeSpan RefreshInterval { get; set; }
         public Record WorldRecord { get; protected set; }
+        public bool LeaderboardExists { get; protected set; }
         public ReadOnlyCollection<Record> AllTies { get; protected set; }
         private bool IsLoading { get; set; }
         private SpeedrunComClient Client { get; set; }
@@ -74,6 +75,7 @@ namespace LiveSplit.WorldRecord.UI.Components
             LastUpdate = TimeStamp.Now;
 
             WorldRecord = null;
+            LeaderboardExists = false;
 
             try
             {
@@ -112,6 +114,7 @@ namespace LiveSplit.WorldRecord.UI.Components
 
                     if (leaderboard != null)
                     {
+                        LeaderboardExists = true;
                         WorldRecord = leaderboard.Records.FirstOrDefault();
                         AllTies = leaderboard.Records;
                     }
@@ -129,66 +132,57 @@ namespace LiveSplit.WorldRecord.UI.Components
         private void ShowWorldRecord(LayoutMode mode)
         {
             var centeredText = Settings.CenteredText && !Settings.Display2Rows && mode == LayoutMode.Vertical;
-            if (WorldRecord != null)
+            var timingMethod = State.CurrentTimingMethod;
+            var game = State.Run.Metadata.Game;
+            if (game != null)
             {
-                var time = WorldRecord.Times.Primary;
-                var timingMethod = State.CurrentTimingMethod;
-                var game = State.Run.Metadata.Game;
-                if (game != null)
-                {
-                    timingMethod = game.Ruleset.DefaultTimingMethod.ToLiveSplitTimingMethod();
-                    LocalTimeFormatter.Accuracy = game.Ruleset.ShowMilliseconds ? TimeAccuracy.Hundredths : TimeAccuracy.Seconds;
-                }
-
-                var formatted = TimeFormatter.Format(time);
+                timingMethod = game.Ruleset.DefaultTimingMethod.ToLiveSplitTimingMethod();
+                LocalTimeFormatter.Accuracy = game.Ruleset.ShowMilliseconds ? TimeAccuracy.Hundredths : TimeAccuracy.Seconds;
+            }
+            var finalTime = GetPBTime(timingMethod);
+            if (LeaderboardExists || finalTime != null)
+            {
                 var isLoggedIn = SpeedrunCom.Client.IsAccessTokenValid;
                 var userName = string.Empty;
                 if (isLoggedIn)
                     userName = SpeedrunCom.Client.Profile.Name;
 
-                var runners = string.Join(", ", AllTies.Select(t => string.Join(" & ", t.Players.Select(p =>
+                var runners = "";
+                var tieCount = 1;
+                if (LeaderboardExists) {
+                    runners = string.Join(", ", AllTies.Select(t => string.Join(" & ", t.Players.Select(p =>
                     isLoggedIn && p.Name == userName ? "me" : p.Name))));
-                var tieCount = AllTies.Count;
+                    tieCount = AllTies.Count;
+                }
 
-                var finalTime = GetPBTime(timingMethod);
-                if (IsPBTimeLower(finalTime, time, game != null ? game.Ruleset.ShowMilliseconds : false))
+                if (WorldRecord == null && finalTime == null)
+                {
+                    ShowUnknownWorldRecord(mode);
+                    return;
+                }
+
+                string formatted = null;
+                TimeSpan? recordTime = null;
+                if (WorldRecord != null)
+                {
+                    recordTime = WorldRecord.Times.Primary;
+                    formatted = TimeFormatter.Format(recordTime);
+                }
+                if (IsPBTimeLower(finalTime, recordTime, game != null ? game.Ruleset.ShowMilliseconds : false))
                 {
                     formatted = LocalTimeFormatter.Format(finalTime);
-                    runners = State.Run.Metadata.Category.Players.Value > 1 ? "us" : "me";
+                    try
+                    {
+                        runners = State.Run.Metadata.Category.Players.Value > 1 ? "us" : "me";
+                    }
+                    catch (Exception ex)
+                    {
+                        runners = "me";
+                    }
                     tieCount = 1;
                 }
 
-                if (centeredText)
-                {
-                    var textList = new List<string>();
-
-                    textList.Add(string.Format("World Record is {0} by {1}", formatted, runners));
-                    textList.Add(string.Format("World Record: {0} by {1}", formatted, runners));
-                    textList.Add(string.Format("WR: {0} by {1}", formatted, runners));
-                    textList.Add(string.Format("WR is {0} by {1}", formatted, runners));
-
-                    if (tieCount > 1)
-                    {
-                        textList.Add(string.Format("World Record is {0} ({1}-way tie)", formatted, tieCount));
-                        textList.Add(string.Format("World Record: {0} ({1}-way tie)", formatted, tieCount));
-                        textList.Add(string.Format("WR: {0} ({1}-way tie)", formatted, tieCount));
-                        textList.Add(string.Format("WR is {0} ({1}-way tie)", formatted, tieCount));
-                    }
-
-                    InternalComponent.InformationName = textList.First();
-                    InternalComponent.AlternateNameText = textList;
-                }
-                else
-                {
-                    if (tieCount > 1)
-                    {
-                        InternalComponent.InformationValue = string.Format("{0} ({1}-way tie)", formatted, tieCount);
-                    }
-                    else
-                    {
-                        InternalComponent.InformationValue = string.Format("{0} by {1}", formatted, runners);
-                    }
-                }
+                ShowWorldRecord(mode, formatted, runners, tieCount);
             }
             else if (IsLoading)
             {
@@ -204,22 +198,16 @@ namespace LiveSplit.WorldRecord.UI.Components
             }
             else
             {
-                if (centeredText)
-                {
-                    InternalComponent.InformationName = "Unknown World Record";
-                    InternalComponent.AlternateNameText = new[] { "Unknown WR" };
-                }
-                else
-                {
-                    InternalComponent.InformationValue = TimeFormatConstants.DASH;
-                }
+                ShowUnknownWorldRecord(mode);
             }
         }
 
         private bool IsPBTimeLower(TimeSpan? pbTime, TimeSpan? recordTime, bool showMillis)
         {
-            if (pbTime == null || recordTime == null)
+            if (pbTime == null)
                 return false;
+            if (recordTime == null)
+                return true;
             if (showMillis)
                 return (int)pbTime.Value.TotalMilliseconds <= (int)recordTime.Value.TotalMilliseconds;
             return (int)pbTime.Value.TotalSeconds <= (int)recordTime.Value.TotalSeconds;
@@ -290,6 +278,54 @@ namespace LiveSplit.WorldRecord.UI.Components
                             ? Settings.BackgroundColor
                             : Settings.BackgroundColor2);
                 g.FillRectangle(gradientBrush, 0, 0, width, height);
+            }
+        }
+
+        private void ShowUnknownWorldRecord(LayoutMode mode)
+        {
+            if (Settings.CenteredText && !Settings.Display2Rows && mode == LayoutMode.Vertical)
+            {
+                InternalComponent.InformationName = "Unknown World Record";
+                InternalComponent.AlternateNameText = new[] { "Unknown WR" };
+            }
+            else
+            {
+                InternalComponent.InformationValue = TimeFormatConstants.DASH;
+            }
+        }
+
+        private void ShowWorldRecord(LayoutMode mode, String formatted, String runners, int tieCount)
+        {
+            if (Settings.CenteredText && !Settings.Display2Rows && mode == LayoutMode.Vertical)
+            {
+                var textList = new List<string>();
+
+                textList.Add(string.Format("World Record is {0} by {1}", formatted, runners));
+                textList.Add(string.Format("World Record: {0} by {1}", formatted, runners));
+                textList.Add(string.Format("WR: {0} by {1}", formatted, runners));
+                textList.Add(string.Format("WR is {0} by {1}", formatted, runners));
+
+                if (tieCount > 1)
+                {
+                    textList.Add(string.Format("World Record is {0} ({1}-way tie)", formatted, tieCount));
+                    textList.Add(string.Format("World Record: {0} ({1}-way tie)", formatted, tieCount));
+                    textList.Add(string.Format("WR: {0} ({1}-way tie)", formatted, tieCount));
+                    textList.Add(string.Format("WR is {0} ({1}-way tie)", formatted, tieCount));
+                }
+
+                InternalComponent.InformationName = textList.First();
+                InternalComponent.AlternateNameText = textList;
+            }
+            else
+            {
+                if (tieCount > 1)
+                {
+                    InternalComponent.InformationValue = string.Format("{0} ({1}-way tie)", formatted, tieCount);
+                }
+                else
+                {
+                    InternalComponent.InformationValue = string.Format("{0} by {1}", formatted, runners);
+                }
             }
         }
 
